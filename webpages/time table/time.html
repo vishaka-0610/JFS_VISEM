@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Faculty-wise Timetable</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; }
+    table { width: 90%; border-collapse: collapse; margin: 12px 0 28px; }
+    th, td { border: 1px solid #000; padding: 8px; text-align: center; vertical-align: top; }
+    th { background: lightblue; }
+    .faculty-title { font-weight: 700; font-size: 20px; margin-top: 28px; }
+    .hint { font-size: 12px; color: #333; margin-bottom: 8px; }
+    .warn { color: #b45309; font-size: 12px; }
+    .stack { margin: 4px 0; }
+  </style>
+</head>
+<body>
+
+  <h2>Upload CSV File</h2>
+  <select id="faculty_id">
+    <option value="ALL">Select All Faculty </option>
+    <option value="KMY"> k mAYURI</option>
+    <option value="CVR">CVR</option>
+</select>
+  <input type="file" id="csvFile" accept=".csv">
+  <div id="warnings"></div>
+  <div id="tables"></div>
+
+  <script>
+
+
+    document.getElementById("csvFile").addEventListener("change", function () {
+      const file = this.files?.[0];
+      if (!file) return;
+
+      Papa.parse(file, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (result) => {
+          const data = result.data || [];
+          buildFacultyTimetables(data);
+        }
+      });
+    });
+
+    function buildFacultyTimetables(rows) {
+      const warnings = [];
+      const container = document.getElementById("tables");
+      const warnBox = document.getElementById("warnings");
+      container.innerHTML = "";
+      warnBox.innerHTML = "";
+
+      // Validate headers
+      const headers = rows.length ? Object.keys(rows[0]) : [];
+      const missing = REQUIRED_HEADERS.filter(h => !headers.includes(h));
+      if (missing.length) {
+        warnBox.innerHTML = `<div class="warn">Missing headers: ${missing.join(", ")}.</div>`;
+        return;
+      }
+
+      // facultyTimetable structure:
+      // {
+      //   [facultyId]: {
+      //     name: "Dr. X",
+      //     days: {
+      //       MON: { FN: "content", AN: "content" },
+      //       ...
+      //     }
+      //   }
+      // }
+      const facultyTimetable = {};
+
+      rows.forEach((row, idx) => {
+        const facultyId = String(row["FACULTY_ID"] || "").trim();
+        const facultyName = String(row["FACULTY"] || "").trim();
+        const dayRaw = String(row["DAY"] || "").trim().toUpperCase();
+        const sessionRaw = String(row["SESSION"] || "").trim().toUpperCase();
+        const course = sanitize(row["COURSE"]);
+        const room = sanitize(row["ROOM"]);
+
+        // Basic validation per row
+        if (!facultyId || !facultyName || !dayRaw || !sessionRaw) {
+          warnings.push(`Row ${idx + 2}: Missing required fields.`);
+          return;
+        }
+        if (!DAYS.includes(dayRaw)) {
+          warnings.push(`Row ${idx + 2}: Invalid DAY "${dayRaw}". Expected one of ${DAYS.join(", ")}.`);
+          return;
+        }
+        if (!SESSIONS.includes(sessionRaw)) {
+          warnings.push(`Row ${idx + 2}: Invalid SESSION "${sessionRaw}". Use FN or AN.`);
+          return;
+        }
+
+        // Init structures
+        if (!facultyTimetable[facultyId]) {
+          facultyTimetable[facultyId] = { name: facultyName, days: {} };
+        } else {
+          // If same facultyId appears with different names, note it
+          if (facultyTimetable[facultyId].name !== facultyName) {
+            warnings.push(`Faculty ID ${facultyId} has multiple names: "${facultyTimetable[facultyId].name}" vs "${facultyName}". Using first.`);
+          }
+        }
+        if (!facultyTimetable[facultyId].days[dayRaw]) {
+          facultyTimetable[facultyId].days[dayRaw] = { FN: "", AN: "" };
+        }
+
+        // Compose cell content
+        const content = `${escapeHtml(course)}<br>Room: ${escapeHtml(room)}`;
+
+        // Handle collision: multiple entries for same faculty/day/session
+        const existing = facultyTimetable[facultyId].days[dayRaw][sessionRaw];
+        if (existing) {
+          facultyTimetable[facultyId].days[dayRaw][sessionRaw] = existing + `<div class="stack"><hr>${content}</div>`;
+          warnings.push(`Row ${idx + 2}: Duplicate for ${facultyId} ${dayRaw} ${sessionRaw} — stacked both.`);
+        } else {
+          facultyTimetable[facultyId].days[dayRaw][sessionRaw] = content;
+        }
+      });
+
+      // Render tables per faculty
+      Object.keys(facultyTimetable).forEach(facultyId => {
+        const { name, days } = facultyTimetable[facultyId];
+
+        const title = document.createElement("div");
+        title.className = "faculty-title";
+        title.innerHTML = `Faculty: ${escapeHtml(name)} (ID: ${escapeHtml(facultyId)})`;
+        container.appendChild(title);
+
+        const table = document.createElement("table");
+        let html = `
+          <tr>
+            <th>DAY</th>
+            <th>FN</th>
+            <th rowspan="7">L<br>U<br>N<br>C<br>H</th>
+            <th>AN</th>
+          </tr>
+        `;
+
+        DAYS.forEach(day => {
+          const fn = days[day]?.FN || "";
+          const an = days[day]?.AN || "";
+          html += `
+            <tr>
+              <td>${day}</td>
+              <td>${fn}</td>
+              <td>${an}</td>
+            </tr>
+          `;
+        });
+
+        table.innerHTML = html;
+        container.appendChild(table);
+      });
+
+      // Show warnings if any
+      if (warnings.length) {
+        warnBox.innerHTML = `<div class="warn"><strong>Notes:</strong><br>${warnings.map(w => `• ${escapeHtml(w)}`).join("<br>")}</div>`;
+      }
+    }
+
+    // Helpers
+    function sanitize(v) {
+      return String(v ?? "").trim();
+    }
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, s => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[s]));
+    }
+  </script>
+</body>
+</html>
